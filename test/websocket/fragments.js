@@ -3,7 +3,7 @@
 const assert = require('node:assert')
 const { test, after } = require('node:test')
 const { WebSocketServer } = require('ws')
-const { WebSocket } = require('../..')
+const { WebSocket, Agent } = require('../..')
 const diagnosticsChannel = require('node:diagnostics_channel')
 
 test('Fragmented frame with a ping frame in the middle of it', () => {
@@ -38,5 +38,272 @@ test('Fragmented frame with a ping frame in the middle of it', () => {
       ws.close()
       resolve()
     })
+  })
+})
+
+test('Too many fragments (uncompressed)', { timeout: 5000 }, (t, done) => {
+  function maybeDone () {
+    if (++maybeDone.callCount === 2) {
+      agent.close()
+      server.close(done)
+    }
+  }
+
+  maybeDone.callCount = 0
+
+  const agent = new Agent({
+    webSocket: {
+      maxFragments: 3
+    }
+  })
+
+  const server = new WebSocketServer({ port: 0 }, () => {
+    const { port } = server.address()
+    const client = new WebSocket(`ws://127.0.0.1:${port}`, {
+      dispatcher: agent
+    })
+
+    client.addEventListener('error', () => {
+      assert.ok(true)
+    })
+
+    client.addEventListener('close', (event) => {
+      assert.strictEqual(event.code, 1006)
+      maybeDone()
+    })
+  })
+
+  server.on('connection', (ws) => {
+    ws.on('close', (code, reason) => {
+      assert.strictEqual(code, 1008)
+      assert.strictEqual(reason.toString(), 'Too many message fragments')
+      maybeDone()
+    })
+
+    const fragment = Buffer.from('a')
+    const options = { fin: false }
+
+    ws.send(fragment, options)
+    ws.send(fragment, options)
+    ws.send(fragment, options)
+    ws.send(fragment, options)
+  })
+})
+
+test('Too many fragments (compressed)', { timeout: 5000 }, (t, done) => {
+  function maybeDone () {
+    if (++maybeDone.callCount === 2) {
+      agent.close()
+      server.close(done)
+    }
+  }
+
+  maybeDone.callCount = 0
+
+  const agent = new Agent({
+    webSocket: {
+      maxFragments: 3
+    }
+  })
+
+  const server = new WebSocketServer({
+    perMessageDeflate: { threshold: 0 },
+    port: 0
+  }, () => {
+    const { port } = server.address()
+    const client = new WebSocket(`ws://127.0.0.1:${port}`, {
+      dispatcher: agent
+    })
+
+    client.addEventListener('error', () => {
+      assert.ok(true)
+    })
+
+    client.addEventListener('close', (event) => {
+      assert.strictEqual(event.code, 1006)
+      maybeDone()
+    })
+  })
+
+  server.on('connection', (ws) => {
+    ws.on('close', (code, reason) => {
+      assert.strictEqual(code, 1008)
+      assert.strictEqual(reason.toString(), 'Too many message fragments')
+      maybeDone()
+    })
+
+    const fragment = Buffer.from('a')
+    const options = { fin: false }
+
+    ws.send(fragment, options)
+    ws.send(fragment, options)
+    ws.send(fragment, options)
+    ws.send(fragment, options)
+  })
+})
+
+test('Empty first fragment followed by non-empty continuation delivers the message', () => {
+  // RFC 6455 §5.4 allows zero-byte fragments. A conforming server that opens
+  // a fragmented message with an empty frame must be honored: the parser must
+  // recognize the in-progress fragmented message when the continuation arrives.
+  const server = new WebSocketServer({ port: 0 })
+
+  server.on('connection', (ws) => {
+    ws.send('', { fin: false })
+    ws.send('hello', { fin: true })
+  })
+
+  after(() => {
+    for (const client of server.clients) {
+      client.close()
+    }
+
+    server.close()
+  })
+
+  const ws = new WebSocket(`ws://localhost:${server.address().port}`)
+
+  return new Promise((resolve) => {
+    ws.addEventListener('message', ({ data }) => {
+      assert.strictEqual(data, 'hello')
+
+      ws.close()
+      resolve()
+    })
+  })
+})
+
+test('Too many empty fragments triggers close 1008', { timeout: 5000 }, (t, done) => {
+  function maybeDone () {
+    if (++maybeDone.callCount === 2) {
+      agent.close()
+      server.close(done)
+    }
+  }
+
+  maybeDone.callCount = 0
+
+  const agent = new Agent({
+    webSocket: {
+      maxFragments: 3
+    }
+  })
+
+  const server = new WebSocketServer({ port: 0 }, () => {
+    const { port } = server.address()
+    const client = new WebSocket(`ws://127.0.0.1:${port}`, {
+      dispatcher: agent
+    })
+
+    client.addEventListener('error', () => {
+      assert.ok(true)
+    })
+
+    client.addEventListener('close', (event) => {
+      assert.strictEqual(event.code, 1006)
+      maybeDone()
+    })
+  })
+
+  server.on('connection', (ws) => {
+    ws.on('close', (code, reason) => {
+      assert.strictEqual(code, 1008)
+      assert.strictEqual(reason.toString(), 'Too many message fragments')
+      maybeDone()
+    })
+
+    const fragment = ''
+    const options = { fin: false }
+
+    ws.send(fragment, options) // Text frame fin=0, len=0
+    ws.send(fragment, options) // Continuation fin=0, len=0
+    ws.send(fragment, options) // Continuation fin=0, len=0
+    ws.send(fragment, options) // Continuation fin=0, len=0
+  })
+})
+
+test('Message with exactly maxFragments fragments is delivered', () => {
+  const server = new WebSocketServer({ port: 0 })
+
+  server.on('connection', (ws) => {
+    ws.send('a', { fin: false })
+    ws.send('b', { fin: false })
+    ws.send('c', { fin: true })
+  })
+
+  const agent = new Agent({
+    webSocket: {
+      maxFragments: 3
+    }
+  })
+
+  after(async () => {
+    for (const client of server.clients) {
+      client.close()
+    }
+
+    server.close()
+    await agent.close()
+  })
+
+  const ws = new WebSocket(`ws://localhost:${server.address().port}`, {
+    dispatcher: agent
+  })
+
+  return new Promise((resolve) => {
+    ws.addEventListener('message', ({ data }) => {
+      assert.strictEqual(data, 'abc')
+
+      ws.close()
+      resolve()
+    })
+  })
+})
+
+test('Default fragment limit rejects a flood of empty continuation frames', { timeout: 5000 }, (t, done) => {
+  // No dispatcher options: the default limit (131072 fragments) must apply.
+  const DEFAULT_MAX_FRAGMENTS = 131072
+
+  function maybeDone () {
+    if (++maybeDone.callCount === 2) {
+      server.close(done)
+    }
+  }
+
+  maybeDone.callCount = 0
+
+  const server = new WebSocketServer({ port: 0 }, () => {
+    const { port } = server.address()
+    const client = new WebSocket(`ws://127.0.0.1:${port}`)
+
+    client.addEventListener('error', () => {
+      assert.ok(true)
+    })
+
+    client.addEventListener('message', () => {
+      assert.fail('message should not be received')
+    })
+
+    client.addEventListener('close', (event) => {
+      assert.strictEqual(event.code, 1006)
+      maybeDone()
+    })
+  })
+
+  server.on('connection', (ws) => {
+    ws.on('error', () => {})
+
+    ws.on('close', (code, reason) => {
+      assert.strictEqual(code, 1008)
+      assert.strictEqual(reason.toString(), 'Too many message fragments')
+      maybeDone()
+    })
+
+    // Text frame fin=0, len=0 followed by DEFAULT_MAX_FRAGMENTS empty
+    // continuation frames (fin=0, len=0): one fragment over the limit.
+    const frames = Buffer.alloc((DEFAULT_MAX_FRAGMENTS + 1) * 2)
+    frames[0] = 0x01
+
+    ws._socket.write(frames)
   })
 })
