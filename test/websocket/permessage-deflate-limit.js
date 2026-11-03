@@ -23,6 +23,6 @@ test('Compressed message under limit decompresses successfully', async (t) => {
   const client = new WebSocket(`ws://127.0.0.1:${server.address().port}`)
 
   const [event] = await once(client, 'message')
-  t.assert.strictEqual(event.data.size, 1024)
+  require('node:assert').strictEqual(event.data.size, 1024)
   client.close()
 })
